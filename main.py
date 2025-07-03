@@ -11,6 +11,7 @@ import uuid
 import tempfile
 from datetime import datetime, timedelta
 from typing import List, Optional
+from control_aportantes_processor import obtener_nits_con_planillas_procesadas
 import re
 
 # Importación del módulo control aportantes
@@ -22,13 +23,15 @@ from control_aportantes_processor import (
     obtener_municipios_por_departamento,
     filtrar_nits_por_geografia,
     obtener_estadisticas_geograficas,
+    obtener_nits_con_planillas_procesadas,
     aportantes_sessions
 )
 
 # Importación del módulo base de datos
 from database_config import (
     CruceLogDB, 
-    ProcesAmientoPlanillasDB, 
+    ProcesAmientoPlanillasDB,
+    PlanillasDB, 
     inicializar_base_datos, 
     extraer_fecha_de_archivos
 )
@@ -583,6 +586,17 @@ async def procesar_archivo_con_bd(
                 str(salida_excel)
             )
             print(f"[BD] Procesamiento guardado en BD con ID: {db_id}")
+            
+            # *** LÍNEAS NUEVAS - GUARDAR PLANILLAS INDIVIDUALES ***
+            if db_id:
+                print(f"[BD] Guardando {len(registros)} planillas individuales...")
+                planillas_guardadas = ProcesAmientoPlanillasDB.guardar_planillas_procesadas(df, db_id)
+                print(f"[BD] ✅ {planillas_guardadas} planillas individuales guardadas exitosamente")
+                
+                # Mostrar NITs únicos que se procesaron
+                nits_unicos = df['No. Identificación Aportante'].dropna().unique()
+                print(f"[BD] 🎯 NITs procesados: {len(nits_unicos)} únicos")
+                
         except Exception as e:
             print(f"[BD ERROR] No se pudo guardar procesamiento: {e}")
 
@@ -822,6 +836,70 @@ async def procesar_cruce_log_con_bd(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error en procesamiento: {str(e)}")
+
+# NUEVOS ENDPOINTS para consultar planillas desde Control Aportantes
+
+@app.get("/aportantes_planillas/{nit}")
+def get_planillas_por_nit(nit: str, limite: int = 100):
+    """Obtiene planillas procesadas para un NIT específico desde Control Aportantes"""
+    try:
+        planillas = PlanillasDB.obtener_planillas_por_nit(nit, limite)
+        estadisticas = PlanillasDB.obtener_estadisticas_planillas_nit(nit)
+        
+        return {
+            "nit": nit,
+            "planillas": planillas,
+            "estadisticas": estadisticas,
+            "total_encontradas": len(planillas)
+        }
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+@app.get("/verificar_planillas_disponibles/{nit}")
+def verificar_planillas_disponibles(nit: str):
+    """Verifica si hay planillas procesadas disponibles para un NIT"""
+    try:
+        from database_config import get_db_connection
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            query = "SELECT COUNT(*) FROM planillas_procesadas WHERE nit = %s"
+            cursor.execute(query, (str(nit),))
+            count = cursor.fetchone()[0]
+            
+            return {
+                "nit": nit,
+                "tiene_planillas": count > 0,
+                "total_planillas": count
+            }
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    
+@app.get("/aportantes_nits_with_planillas/{session_id}")
+async def get_nits_with_planillas(session_id: str):
+    """Endpoint para obtener NITs que tienen planillas procesadas en la BD"""
+    try:
+        print(f"[API] Consultando NITs con planillas para sesión: {session_id}")
+        
+        # Llamar a la función que consulta la BD
+        nits_con_planillas = obtener_nits_con_planillas_procesadas(session_id)
+        
+        print(f"[API] Encontrados {len(nits_con_planillas)} NITs con planillas")
+        
+        return {
+            "success": True,
+            "nits_with_planillas": nits_con_planillas,
+            "total_with_planillas": len(nits_con_planillas)
+        }
+        
+    except Exception as e:
+        print(f"[API ERROR] Error obteniendo NITs con planillas: {e}")
+        return {
+            "success": False,
+            "nits_with_planillas": [],
+            "total_with_planillas": 0,
+            "error": str(e)
+        }
+    
         
 if __name__ == "__main__":
     import uvicorn
